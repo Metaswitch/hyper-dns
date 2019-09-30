@@ -14,9 +14,13 @@ repository = "cswindle/hyper-dns"
 
 [dependencies]
 futures = "0.1.14"
-hyper = "0.12"
+#hyper = "0.12"
 log = "0.4.3"
 rand = "0.5.5"
 tokio-core = "0.1.8"
 tokio-reactor = "0.1"
 trust-dns = "0.14"
+
+[dependencies.hyper]
+git = "https://gitlab.datcon.co.uk/orchestration/hyper.git"
+branch = "mwr/etag-hack"
