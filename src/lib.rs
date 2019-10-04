@@ -7,71 +7,84 @@ extern crate hyper;
 extern crate rand;
 extern crate trust_dns;
 
-use trust_dns::client::ClientHandle;
-use rand::Rng;
-use hyper::client::connect::{Connect, Destination};
-use std::time::Duration;
 use std::io;
-use hyper::rt::Future;
-use futures::future;
+use std::time::Duration;
 
-/// Docs
+use futures::future;
+use hyper::client::connect::{Connect, Destination};
+use hyper::rt::Future;
+use rand::Rng;
+use trust_dns::client::ClientHandle;
+
+/// What flavour of DNS resolution to use.
 #[derive(Debug, Clone)]
 pub enum RecordType {
-    /// A
+    /// A records
     A,
-    /// SRV
+    /// SRV records
     SRV,
-    /// AUTO
+    /// Automatic (i.e. A records if a port is provided, SRV otherwise)
     AUTO,
 }
 
 /// A connector that wraps another connector and provides custom DNS resolution.
 #[derive(Debug, Clone)]
-pub struct DnsConnector<C> {
-    connector: C,
-    record_type: RecordType,
-    // dns_client: trust_dns::client::ClientFuture<S>,
+pub struct DnsConnector<C>
+where
+    C: Connect,
+{
+    /// The DNS server address
     dns_addr: std::net::SocketAddr,
+
+    /// The inner connector object
+    connector: C,
+
+    /// DNS record type to look up
+    record_type: RecordType,
+
+    /// Whether to only allow the connector (after DNS resolution) to yield an HTTPS destination
     force_https: bool,
 }
 
 impl<C> DnsConnector<C>
-where C: Connect,
+where
+    C: Connect,
 {
-    /// Docs
-    pub fn new(dns_addr: std::net::SocketAddr, connector: C) -> DnsConnector<C> {
-        Self::new_with_resolve_type(dns_addr, connector, RecordType::AUTO)
+    /// Create a new `DnsConnector` instance with AUTO DNS record type.
+    pub fn new(dns_addr: std::net::SocketAddr, connector: C, force_https: bool) -> DnsConnector<C> {
+        Self::new_with_resolve_type(dns_addr, connector, RecordType::AUTO, force_https)
     }
 
-    /// Docs
-    pub fn new_with_resolve_type(dns_addr: std::net::SocketAddr,
-                                 connector: C,
-                                 record_type: RecordType)
-                                 -> DnsConnector<C> {
-
+    /// Create a new `DnsConnector` instance with specified DNS record type.
+    pub fn new_with_resolve_type(
+        dns_addr: std::net::SocketAddr,
+        connector: C,
+        record_type: RecordType,
+        force_https: bool,
+    ) -> DnsConnector<C> {
         DnsConnector {
-            connector: connector,
-            record_type: record_type,
-            dns_addr: dns_addr,
-            force_https: true,
+            dns_addr,
+            connector,
+            record_type,
+            force_https,
         }
     }
 }
 
 impl<C> Connect for DnsConnector<C>
-where C: 'static,
-      C: Connect<Error=io::Error>,
-      C: Clone,
-      C::Transport: Send + 'static,
-      C::Future: Send + 'static,
+where
+    C: 'static + Clone + Connect<Error = io::Error>,
+    C::Transport: Send + 'static,
+    C::Future: Send + 'static,
 {
     type Transport = C::Transport;
     type Error = io::Error;
-    type Future = Box<Future<Item=<C::Future as Future>::Item, Error=<C::Future as Future>::Error> + Send>;
+    type Future = Box<
+        dyn Future<Item = <C::Future as Future>::Item, Error = <C::Future as Future>::Error> + Send,
+    >;
 
+    /// Implementation of the main Connect trait function.
     fn connect(&self, dst: Destination) -> Self::Future {
-
         let connector = self.connector.clone();
         let force_https = self.force_https;
 
@@ -81,13 +94,10 @@ where C: 'static,
         // to ensure that we don't wait for ever if the DNS server does not respond.
         let timeout = Duration::from_millis(30000);
 
-        let (stream, sender) = trust_dns::tcp::TcpClientStream::with_timeout(self.dns_addr, timeout);
+        let (stream, sender) =
+            trust_dns::tcp::TcpClientStream::with_timeout(self.dns_addr, timeout);
 
-        let dns_client =
-            trust_dns::client::ClientFuture::new(
-                stream,
-                sender,
-                None);
+        let dns_client = trust_dns::client::ClientFuture::new(stream, sender, None);
 
         // Check if this is a domain name or not before trying to use DNS resolution.
         match dst.host().to_string().parse() {
@@ -96,7 +106,7 @@ where C: 'static,
                 Box::new(connector.connect(dst.clone()))
             }
             Err(_) => {
-                let port = dst.port().clone();
+                let port = dst.port();
                 let scheme = dst.scheme().to_string();
                 let host = dst.host().to_string();
 
@@ -126,73 +136,98 @@ where C: 'static,
 
                 let future = dns_client
                     .and_then(move |mut client| {
-                        client.query(name_clone.clone(),
-                        trust_dns::rr::DNSClass::IN,
-                        trust_record_type)
+                        // Send the request
+                        client.query(
+                            name_clone.clone(),
+                            trust_dns::rr::DNSClass::IN,
+                            trust_record_type,
+                        )
                     })
                     .or_else(|e| {
-                        debug!("Received error: {:?}", e);
-                        return future::err(std::io::Error::new(std::io::ErrorKind::Other,
-                                                       "Failed to query DNS server")
-                                           .into());
+                        // Handle errors
+                        debug!("Received resolution error: {:?}", e);
+                        future::err(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            "Failed to query DNS server",
+                        ))
                     })
                     .and_then(move |res| {
-                        debug!("Got answers: {:?}", res);
+                        // Handle response, initially by picking out the relevant record
+                        debug!("Got resolution responses: {:?}", res);
 
                         let answers = res.answers();
 
                         if answers.is_empty() {
                             debug!("No valid answers received");
-                            return future::err(std::io::Error::new(std::io::ErrorKind::Other,
-                                                           "No valid DNS answers")
-                                               .into());
+                            return future::err(std::io::Error::new(
+                                std::io::ErrorKind::Other,
+                                "No valid DNS answers",
+                            ));
                         }
 
+                        // Create an random number generator used for various look-ups.
                         let mut rng = rand::thread_rng();
 
-                        // First find the SRV records if they were requested
-                        let (target, a_records, new_port) = if let trust_dns::rr::RecordType::SRV =
-                            trust_record_type
-                        {
-                            let answer = rng.choose(answers).expect("Sort out what to return here");
+                        // Work out the relevant target, which may be within SRV records.
+                        let (target, a_records, new_port) =
+                            if let trust_dns::rr::RecordType::SRV = trust_record_type {
+                                // Randomize the choice between entries, in case there are many and
+                                // one is down.
+                                let answer = match rng.choose(answers) {
+                                    Some(entry) => entry,
+                                    None => {
+                                        return future::err(std::io::Error::new(
+                                            std::io::ErrorKind::Other,
+                                            "Unable to choose from DNS answers",
+                                        ));
+                                    }
+                                };
 
-                            let srv = match *answer.rdata() {
-                                trust_dns::rr::RData::SRV(ref srv) => srv,
-                                _ => {
-                                    return future::err(std::io::Error::new(std::io::ErrorKind::Other,
-                                                                   "Unexpected DNS response")
-                                                       .into())
-                                }
+                                let srv = match *answer.rdata() {
+                                    trust_dns::rr::RData::SRV(ref srv) => srv,
+                                    _ => {
+                                        return future::err(std::io::Error::new(
+                                            std::io::ErrorKind::Other,
+                                            "Unexpected DNS response",
+                                        ))
+                                    }
+                                };
+
+                                (srv.target().clone(), res.additionals(), Some(srv.port()))
+                            } else {
+                                // For A record requests it is the domain name that
+                                // we want to use.
+                                (name.clone(), answers, port)
                             };
 
-                            (srv.target().clone(), res.additionals(), Some(srv.port()))
-                        } else {
-                            // For A record requests it is the domain name that
-                            // we want to use.
-                            (name.clone(), answers, port)
-                        };
-
-                        let entry = a_records.iter().find(|record| record.name() == &target);
+                        // Again, randomize the selection.
+                        let entries: Vec<_> = a_records
+                            .iter()
+                            .filter(|record| record.name() == &target)
+                            .collect();
+                        let entry = rng.choose(&entries);
 
                         if let Some(entry) = entry {
                             let addr = match *entry.rdata() {
                                 trust_dns::rr::RData::A(ref addr) => addr,
                                 _ => {
-                                    return future::err(std::io::Error::new(std::io::ErrorKind::Other,
-                                                                   "Did not receive a valid record")
-                                                       .into())
+                                    return future::err(std::io::Error::new(
+                                        std::io::ErrorKind::Other,
+                                        "Did not receive a valid record",
+                                    ))
                                 }
                             };
 
                             future::ok((addr.to_string(), new_port))
                         } else {
-                            return future::err(std::io::Error::new(std::io::ErrorKind::Other,
-                                                           "Did not receive a valid record")
-                                               .into());
+                            future::err(std::io::Error::new(
+                                std::io::ErrorKind::Other,
+                                "Did not receive a valid record",
+                            ))
                         }
                     })
                     .and_then(move |(ip, port)| {
-
+                        // Actually update the destination with the IP (and port, if appropriate).
                         if let Some(port) = port {
                             debug!("Resolved request to {}://{}:{}", scheme, &ip, port);
                         } else {
@@ -203,7 +238,9 @@ where C: 'static,
                         new_dst.set_host(&ip).expect("Failed to set host");
 
                         if force_https {
-                            new_dst.set_scheme("https").expect("Failed to set scheme to HTTPS");
+                            new_dst
+                                .set_scheme("https")
+                                .expect("Failed to set scheme to HTTPS");
                         }
 
                         if let Some(port) = port {
