@@ -200,12 +200,15 @@ where
                                 (name.clone(), answers, port)
                             };
 
+                        // VG2 - try without randomzing srv record selection
                         // Again, randomize the selection.
-                        let entries: Vec<_> = a_records
-                            .iter()
-                            .filter(|record| record.name() == &target)
-                            .collect();
-                        let entry = rng.choose(&entries);
+                        // let entries: Vec<_> = a_records
+                        //    .iter()
+                        //    .filter(|record| record.name() == &target)
+                        //    .collect();
+                        // let entry = rng.choose(&entries);
+
+                        let entry = a_records.iter().find(|record| record.name() == &target);
 
                         if let Some(entry) = entry {
                             let addr = match *entry.rdata() {
