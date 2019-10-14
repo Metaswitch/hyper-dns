@@ -1,0 +1,21 @@
+# QS project config file.
+#
+
+[qs]
+# The qs version to use with this project.
+version = "3.0.0"
+
+[project]
+name = "hyper-dns"
+full_name = "a NetworkConnector for Hyper which adds the ability to perform SRV lookups on URLs"
+short_name = "HYPDNS"
+project_type = "lib"
+language = "rust"
+version = "0.12.0"
+
+[gitlab]
+server = "gitlab.datcon.co.uk"
+namespace = "orchestration"
+
+[do_checks]
+skip = ["check-todo"]
