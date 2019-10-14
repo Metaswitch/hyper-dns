@@ -2,10 +2,11 @@
 authors = ["Chris Swindle <christopher.swindle@metaswitch.com>"]
 description = "This crates provides a NetworkConnector for Hyper which adds the ability to perform SRV lookups on URLs."
 keywords = ["hyper", "dns"]
-license = "MIT"
+license-file = "LICENSE"
 name = "hyper-dns"
 repository = "https://github.com/cswindle/hyper-dns"
 version = "0.12.0"
+publish = ["metaswitch"]
 
 [badges]
 
